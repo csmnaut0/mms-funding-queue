@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>MMS Funding Queue</title>
+<style>
+  :root { --navy:#11173F; --blue:#38B6FF; --steel:#263C6B; --gray:#AFC6D4; --red:#C62828; --amber:#B26A00; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:#fff; color:#1a1a1a; font-family: Arial, Helvetica, sans-serif; font-size:14px; }
+  header { background:var(--navy); color:#fff; padding:14px 20px; display:flex; flex-wrap:wrap; align-items:center; gap:12px; justify-content:space-between; }
+  header h1 { margin:0; font-size:20px; }
+  header .meta { font-size:12px; color:var(--gray); }
+  main { padding:16px 20px 40px; max-width:1400px; margin:0 auto; }
+  .tiles { display:flex; flex-wrap:wrap; gap:12px; margin-bottom:18px; }
+  .tile { border:1px solid #dde5ea; border-left:4px solid var(--steel); padding:10px 14px; min-width:150px; }
+  .tile .n { font-size:26px; font-weight:bold; color:var(--navy); }
+  .tile .l { font-size:12px; color:#555; }
+  .tile.alert { border-left-color:var(--red); } .tile.alert .n { color:var(--red); }
+  .tile.warn { border-left-color:var(--amber); } .tile.warn .n { color:var(--amber); }
+  .controls { display:flex; flex-wrap:wrap; gap:10px; margin-bottom:14px; align-items:center; }
+  .controls input, .controls select { font:inherit; padding:6px 8px; border:1px solid #c5d0d8; }
+  .controls label { font-size:13px; }
+  h2 { font-size:15px; color:var(--steel); margin:22px 0 6px; border-bottom:2px solid var(--gray); padding-bottom:4px; }
+  h2.overdue { color:var(--red); border-color:var(--red); }
+  .wrap { overflow-x:auto; }
+  table { border-collapse:collapse; width:100%; min-width:900px; }
+  th { text-align:left; font-size:12px; color:#555; font-weight:bold; padding:6px 8px; border-bottom:1px solid #dde5ea; white-space:nowrap; }
+  td { padding:7px 8px; border-bottom:1px solid #eef2f5; vertical-align:top; }
+  tr.nofunder td { background:#FFF4E5; }
+  tr.overdue td { background:#FDECEC; }
+  .flag { display:inline-block; font-size:11px; font-weight:bold; padding:1px 6px; margin-left:4px; }
+  .flag.nf { background:var(--amber); color:#fff; }
+  .flag.od { background:var(--red); color:#fff; }
+  .muted { color:#888; }
+  .empty { padding:30px; text-align:center; color:#777; }
+  .error { background:#FDECEC; color:var(--red); padding:10px 14px; margin-bottom:12px; display:none; }
+  #gate { max-width:360px; margin:80px auto; text-align:center; }
+  #gate input { font:inherit; padding:8px; width:100%; margin:10px 0; border:1px solid #c5d0d8; }
+  #gate button, .btn { font:inherit; background:var(--navy); color:#fff; border:0; padding:8px 14px; cursor:pointer; }
+  .btn.small { padding:4px 10px; font-size:12px; background:var(--steel); }
+</style>
+</head>
+<body>
+<header>
+  <h1>MMS Funding Queue</h1>
+  <div class="meta"><span id="refreshed">Loading…</span> · auto-refreshes every 30 seconds <button class="btn small" id="refreshBtn">Refresh now</button></div>
+</header>
+
+<div id="gate" style="display:none">
+  <p>Enter the team access code to view the funding queue.</p>
+  <input id="codeInput" type="password" autocomplete="off">
+  <button id="codeBtn">View queue</button>
+  <p class="muted" id="gateMsg"></p>
+</div>
+
+<main id="app" style="display:none">
+  <div class="error" id="err"></div>
+  <div class="tiles" id="tiles"></div>
+  <div class="controls">
+    <input id="search" type="search" placeholder="Search loan #, borrower, funder, title…" size="34">
+    <select id="funderFilter"><option value="">All funders</option></select>
+    <label><input type="checkbox" id="showDone"> Show funded / closed-out loans</label>
+  </div>
+  <div id="groups"></div>
+</main>
+
+<script>
+(function () {
+  var REFRESH_MS = 30000;
+  // Statuses treated as "done" (hidden by default). Adjust to match Arive's exact status names.
+  var DONE = /(funded|purchased|withdrawn|denied|cancel|declined|adverse|archiv|closed out)/i;
+
+  var state = { loans: [], key: "" };
+  try { state.key = localStorage.getItem("mmsFqKey") || ""; } catch (e) {}
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  function parseDate(v) {
+    if (!v) return null;
+    var s = String(v).trim();
+    var m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (m) return new Date(+m[1], +m[2] - 1, +m[3]);
+    m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
+    if (m) return new Date(m[3].length === 2 ? 2000 + +m[3] : +m[3], +m[1] - 1, +m[2]);
+    var d = new Date(s);
+    return isNaN(d) ? null : new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  }
+  function fmtDate(d) { return d ? d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric" }) : "—"; }
+  function fmtStamp(iso) { if (!iso) return "—"; var d = new Date(iso); return isNaN(d) ? iso : d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); }
+  function fmtMoney(v) {
+    if (v === undefined || v === null || v === "") return "—";
+    var n = Number(String(v).replace(/[^0-9.\-]/g, ""));
+    return isNaN(n) ? esc(v) : "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+  function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; }); }
+  function val(v) { return v ? esc(v) : '<span class="muted">—</span>'; }
+
+  function load() {
+    fetch("/api/loans", { headers: { "x-view-key": state.key }, cache: "no-store" })
+      .then(function (r) {
+        if (r.status === 401) { showGate("That code didn't work. Try again."); throw new Error("auth"); }
+        if (!r.ok) throw new Error("Server returned " + r.status);
+        return r.json();
+      })
+      .then(function (data) {
+        $("gate").style.display = "none"; $("app").style.display = "block"; $("err").style.display = "none";
+        state.loans = data.loans || [];
+        $("refreshed").textContent = "Last refreshed " + fmtStamp(data.served_at);
+        buildFunderFilter(); render();
+      })
+      .catch(function (e) {
+        if (e.message === "auth") return;
+        $("err").textContent = "Couldn't refresh the queue (" + e.message + "). Showing the last data loaded.";
+        $("err").style.display = "block";
+      });
+  }
+
+  function showGate(msg) {
+    $("app").style.display = "none"; $("gate").style.display = "block";
+    $("gateMsg").textContent = msg || ""; $("codeInput").focus();
+  }
+
+  function buildFunderFilter() {
+    var sel = $("funderFilter"), cur = sel.value, seen = {};
+    state.loans.forEach(function (l) { if (l.funder) seen[l.funder] = 1; });
+    sel.innerHTML = '<option value="">All funders</option><option value="__none">No funder assigned</option>' +
+      Object.keys(seen).sort().map(function (f) { return '<option>' + esc(f) + '</option>'; }).join("");
+    sel.value = cur;
+  }
+
+  function render() {
+    var today = new Date(); today = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    var q = $("search").value.trim().toLowerCase();
+    var funder = $("funderFilter").value;
+    var showDone = $("showDone").checked;
+
+    var rows = state.loans.map(function (l) {
+      var d = parseDate(l.funding_date) || parseDate(l.closing_date);
+      return { l: l, d: d, done: DONE.test(l.status || "") };
+    }).filter(function (r) {
+      if (!showDone && r.done) return false;
+      if (funder === "__none" && r.l.funder) return false;
+      if (funder && funder !== "__none" && r.l.funder !== funder) return false;
+      if (q) {
+        var hay = [r.l.loan_number, r.l.borrower, r.l.funder, r.l.closer, r.l.title_company, r.l.loan_officer, r.l.status].join(" ").toLowerCase();
+        if (hay.indexOf(q) === -1) return false;
+      }
+      return true;
+    });
+
+    var dayMs = 86400000, groups = { overdue: [], today: [], tomorrow: [], week: [], later: [], nodate: [] };
+    rows.forEach(function (r) {
+      if (!r.d) return groups.nodate.push(r);
+      var diff = Math.round((r.d - today) / dayMs);
+      r.overdue = diff < 0 && !r.done;
+      if (diff < 0) groups.overdue.push(r);
+      else if (diff === 0) groups.today.push(r);
+      else if (diff === 1) groups.tomorrow.push(r);
+      else if (diff <= 7) groups.week.push(r);
+      else groups.later.push(r);
+    });
+    Object.keys(groups).forEach(function (k) { groups[k].sort(function (a, b) { return (a.d || 0) - (b.d || 0); }); });
+
+    var active = state.loans.filter(function (l) { return !DONE.test(l.status || ""); });
+    var noFunder = active.filter(function (l) { return !l.funder; }).length;
+    $("tiles").innerHTML =
+      tile(active.length, "Active loans in queue") +
+      tile(groups.today.length, "Funding today") +
+      tile(groups.tomorrow.length, "Funding tomorrow") +
+      tile(groups.overdue.filter(function (r) { return !r.done; }).length, "Past funding date, not funded", "alert") +
+      tile(noFunder, "No funder assigned", noFunder ? "warn" : "");
+
+    var order = [["overdue", "Past funding date — check these", "overdue"], ["today", "Funding today"], ["tomorrow", "Funding tomorrow"],
+                 ["week", "Next 7 days"], ["later", "Later"], ["nodate", "No funding / closing date"]];
+    var html = order.map(function (o) { return groups[o[0]].length ? section(o[1], groups[o[0]], o[2]) : ""; }).join("");
+    $("groups").innerHTML = html || '<div class="empty">No loans match. Once Zapier starts sending loans, they’ll appear here.</div>';
+  }
+
+  function tile(n, label, cls) { return '<div class="tile ' + (cls || "") + '"><div class="n">' + n + '</div><div class="l">' + label + '</div></div>'; }
+
+  function section(title, rows, cls) {
+    return '<h2 class="' + (cls || "") + '">' + title + ' (' + rows.length + ')</h2><div class="wrap"><table><thead><tr>' +
+      '<th>Funding date</th><th>Loan #</th><th>Borrower</th><th>Status</th><th>Funder</th><th>Closer</th><th>Title company</th><th>Loan officer</th><th>Loan amount</th><th>Closing date</th><th>Updated from Arive</th>' +
+      '</tr></thead><tbody>' + rows.map(function (r) {
+        var l = r.l, cls = r.overdue ? "overdue" : (!l.funder && !r.done ? "nofunder" : "");
+        var flags = (!l.funder && !r.done ? '<span class="flag nf">NO FUNDER</span>' : "") + (r.overdue ? '<span class="flag od">OVERDUE</span>' : "");
+        return '<tr class="' + cls + '"><td>' + fmtDate(parseDate(l.funding_date)) + '</td><td><b>' + esc(l.loan_number) + '</b>' + flags + '</td><td>' + val(l.borrower) +
+          '</td><td>' + val(l.status) + '</td><td>' + val(l.funder) + '</td><td>' + val(l.closer) + '</td><td>' + val(l.title_company) +
+          '</td><td>' + val(l.loan_officer) + '</td><td>' + fmtMoney(l.loan_amount) + '</td><td>' + fmtDate(parseDate(l.closing_date)) + '</td><td>' + fmtStamp(l.updated_at) + '</td></tr>';
+      }).join("") + '</tbody></table></div>';
+  }
+
+  $("codeBtn").onclick = function () {
+    state.key = $("codeInput").value.trim();
+    try { localStorage.setItem("mmsFqKey", state.key); } catch (e) {}
+    load();
+  };
+  $("codeInput").onkeydown = function (e) { if (e.key === "Enter") $("codeBtn").click(); };
+  $("refreshBtn").onclick = load;
+  ["search", "funderFilter", "showDone"].forEach(function (id) { $(id).addEventListener("input", render); $(id).addEventListener("change", render); });
+
+  load();
+  setInterval(load, REFRESH_MS);
+})();
+</script>
+</body>
+</html>
